@@ -46,6 +46,7 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const trackingCollection = db.collection("trackings");
     const userCollection = db.collection("users");
+    const riderCollection = db.collection("riders");
 
     // customs middlewares
     const verifyFBToken = async (req, res, next) => {
@@ -82,15 +83,16 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/parcels", async (req, res) => {
-      const parcels = await parcelCollection.find().toArray();
-      res.send(parcels);
-    });
+    // app.get("/parcels", async (req, res) => {
+    //   const parcels = await parcelCollection.find().toArray();
+    //   res.send(parcels);
+    // });
 
     // All parcels OR parcels by user (createdBy), sorted by latest
-    app.get("parcels", async (req, res) => {
+
+    app.get("/parcels", verifyFBToken, async (req, res) => {
       try {
-        const userEmail = req.body.email;
+        const userEmail = req.query.email;
         const query = userEmail ? { createdBy: userEmail } : {};
         const options = {
           sort: { creationDate: -1 },
@@ -113,6 +115,126 @@ async function run() {
         console.error("Get parcel error:", error);
         res.status(500).send({ message: "Failed to fetch parcel" });
       }
+    });
+
+    app.post("/riders", async (req, res) => {
+      const email = req.query.email;
+
+      const existing = await riderCollection.findOne({ email });
+
+      if (existing) {
+        return res.status(400).send({ message: "You have already applied." });
+      }
+
+      const result = await riderCollection.insertOne(req.body);
+      res.send(result);
+    });
+
+    app.get("/riders/pending", async (req, res) => {
+      try {
+        const pendingRiders = await riderCollection
+          .find({ status: "pending" })
+          .sort({ appliedAt: -1 })
+          .toArray();
+
+        res.send(pendingRiders);
+      } catch (error) {
+        console.error("Failed to fetch pending riders:", error);
+        res.status(500).send({ message: "Failed to get pending riders" });
+      }
+    });
+
+    app.patch("/riders/:id/approve", async (req, res) => {
+      const id = req.params.id;
+
+      await riderCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: "active" } },
+      );
+
+      res.send({ success: true });
+    });
+
+    app.patch("/riders/:id/reject", async (req, res) => {
+      const id = req.params.id;
+
+      await riderCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: "rejected" } },
+      );
+
+      res.send({ success: true });
+    });
+
+    // Get active riders
+    // app.get("/riders/active", async (req, res) => {
+    //   const riders = await riderCollection.find({ status: "active" }).toArray();
+    //   res.send(riders);
+    // });
+    app.get("/riders/active", async (req, res) => {
+      try {
+        const search = req.query.search || "";
+
+        const query = {
+          status: "active",
+          $or: [
+            { name: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
+            { phone: { $regex: search, $options: "i" } },
+          ],
+        };
+
+        const riders = await riderCollection
+          .find(query)
+          .sort({ approvedAt: -1 })
+          .toArray();
+
+        res.send(riders);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to get active riders" });
+      }
+    });
+
+    app.patch("/riders/deactivate/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const result = await riderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "deactivate",
+              deactivatedAt: new Date(),
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to deactivate rider" });
+      }
+    });
+
+    // Delete rider
+    app.delete("/riders/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await riderCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+      res.send(result);
+    });
+
+    // Update rider
+    app.patch("/riders/:id", async (req, res) => {
+      const id = req.params.id;
+      const updatedData = req.body;
+
+      const result = await riderCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updatedData },
+      );
+
+      res.send(result);
     });
 
     app.post("/tracking", async (req, res) => {
@@ -138,14 +260,27 @@ async function run() {
       res.send({ success: true, insertedId: result.insertedId });
     });
 
+    // app.get("/payments", verifyFBToken, async (req, res) => {
+    //   try {
+    //     const email = req.decoded.email;
+
+    //     const payments = await paymentCollection
+    //       .find({ email })
+    //       .sort({ paidAt: -1 })
+    //       .toArray();
+
+    //     res.send(payments);
+    //   } catch (error) {
+    //     console.error("Error fetching payment history:", error);
+    //     res.status(500).send({ message: "Failed to get payments" });
+    //   }
+    // });
+
     app.get("/payments", verifyFBToken, async (req, res) => {
       // console.log("headers in payments", req.headers);
 
       try {
         const userEmail = req.query.email;
-
-        console.log("Email-1", req.decoded.email);
-        console.log("Email-2", userEmail);
 
         console.log("decoded", req.decoded);
         if (req.decoded.email !== userEmail) {
