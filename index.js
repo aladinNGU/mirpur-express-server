@@ -70,6 +70,113 @@ async function run() {
       }
     };
 
+    app.get("/users/search", async (req, res) => {
+      try {
+        const search = req.query.search;
+
+        if (!search) {
+          return res.send([]); // return empty if no search
+        }
+
+        const query = {
+          email: { $regex: search, $options: "i" },
+        };
+
+        const users = await userCollection
+          .find(query)
+          .project({
+            email: 1,
+            role: 1,
+            createdAt: 1,
+          })
+          .limit(10)
+          .toArray();
+
+        res.send(users);
+      } catch (error) {
+        console.error("User search error:", error);
+        res.status(500).send({ message: "Failed to search users" });
+      }
+    });
+
+    app.patch("/users/make-admin/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              role: "admin",
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to make admin" });
+      }
+    });
+
+    app.patch("/users/revoke-admin/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              role: "user",
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to revoke admin" });
+      }
+    });
+
+    app.get("/users/role", async (req, res) => {
+      try {
+        const { email } = req.query;
+
+        // 1️⃣ Validate email
+        if (!email) {
+          return res.status(400).json({
+            success: false,
+            message: "Email query parameter is required",
+          });
+        }
+
+        // 2️⃣ Find user
+        const user = await userCollection.findOne(
+          { email },
+          { projection: { role: 1 } }, // only fetch role
+        );
+
+        // 3️⃣ If user not found → default role
+        if (!user) {
+          return res.status(200).json({
+            success: true,
+            role: "user",
+          });
+        }
+
+        // 4️⃣ Return role
+        return res.status(200).json({
+          success: true,
+          role: user.role || "user",
+        });
+      } catch (error) {
+        console.error("Get user role error:", error);
+        return res.status(500).json({
+          success: false,
+          message: "Internal server error",
+        });
+      }
+    });
+
     app.post("/users", async (req, res) => {
       const email = req.body.email;
       const userExists = await userCollection.findOne({ email });
@@ -83,14 +190,7 @@ async function run() {
       res.send(result);
     });
 
-    // app.get("/parcels", async (req, res) => {
-    //   const parcels = await parcelCollection.find().toArray();
-    //   res.send(parcels);
-    // });
-
-    // All parcels OR parcels by user (createdBy), sorted by latest
-
-    app.get("/parcels", verifyFBToken, async (req, res) => {
+    app.get("/parcels", async (req, res) => {
       try {
         const userEmail = req.query.email;
         const query = userEmail ? { createdBy: userEmail } : {};
@@ -144,15 +244,78 @@ async function run() {
       }
     });
 
+    // app.patch("/riders/:id/approve", async (req, res) => {
+    //   const id = req.params.id;
+
+    //   await riderCollection.updateOne(
+    //     { _id: new ObjectId(id) },
+    //     { $set: { status: "active" } },
+    //   );
+    //   // Update user role for accepting rider
+    //   const { email } = req.body;
+    //   if (status === "active") {
+    //     const userQuery = { email };
+    //     const userUpdateDoc = {
+    //       $set: {
+    //         role: "rider",
+    //       },
+    //     };
+    //     const roleResult = await userCollection.updateOne(
+    //       userQuery,
+    //       userUpdateDoc,
+    //     );
+    //     console.log(roleResult.modifiedCount);
+    //   }
+    //   res.send({ success: true });
+    // });
+
     app.patch("/riders/:id/approve", async (req, res) => {
-      const id = req.params.id;
+      try {
+        const id = req.params.id;
 
-      await riderCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { status: "active" } },
-      );
+        // 1️⃣ Update rider status
+        const riderUpdateResult = await riderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "active",
+              approvedAt: new Date(),
+            },
+          },
+        );
 
-      res.send({ success: true });
+        if (riderUpdateResult.modifiedCount === 0) {
+          return res.status(404).send({ message: "Rider not found" });
+        }
+
+        // 2️⃣ Get rider info to access email
+        const rider = await riderCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!rider?.email) {
+          return res.status(400).send({ message: "Rider email not found" });
+        }
+
+        // 3️⃣ Update user role
+        const roleResult = await userCollection.updateOne(
+          { email: rider.email },
+          {
+            $set: {
+              role: "rider",
+            },
+          },
+        );
+
+        res.send({
+          success: true,
+          riderUpdated: riderUpdateResult.modifiedCount,
+          roleUpdated: roleResult.modifiedCount,
+        });
+      } catch (error) {
+        console.error("Approve rider error:", error);
+        res.status(500).send({ message: "Failed to approve rider" });
+      }
     });
 
     app.patch("/riders/:id/reject", async (req, res) => {
@@ -166,11 +329,6 @@ async function run() {
       res.send({ success: true });
     });
 
-    // Get active riders
-    // app.get("/riders/active", async (req, res) => {
-    //   const riders = await riderCollection.find({ status: "active" }).toArray();
-    //   res.send(riders);
-    // });
     app.get("/riders/active", async (req, res) => {
       try {
         const search = req.query.search || "";
@@ -260,36 +418,23 @@ async function run() {
       res.send({ success: true, insertedId: result.insertedId });
     });
 
-    // app.get("/payments", verifyFBToken, async (req, res) => {
-    //   try {
-    //     const email = req.decoded.email;
-
-    //     const payments = await paymentCollection
-    //       .find({ email })
-    //       .sort({ paidAt: -1 })
-    //       .toArray();
-
-    //     res.send(payments);
-    //   } catch (error) {
-    //     console.error("Error fetching payment history:", error);
-    //     res.status(500).send({ message: "Failed to get payments" });
-    //   }
-    // });
-
-    app.get("/payments", verifyFBToken, async (req, res) => {
+    app.get("/payments", async (req, res) => {
       // console.log("headers in payments", req.headers);
-
       try {
         const userEmail = req.query.email;
 
-        console.log("decoded", req.decoded);
-        if (req.decoded.email !== userEmail) {
-          return res.status(403).send({ message: "forbidden access" });
-        }
+        // console.log(userEmail);
+        // console.log("decoded", req.decoded.email);
+
+        // if (req.decoded.email !== userEmail) {
+        //   return res.status(403).send({ message: "forbidden access" });
+        // }
 
         const query = userEmail ? { email: userEmail } : {};
         const options = { sort: { paidAt: -1 } };
+
         const payments = await paymentCollection.find(query, options).toArray();
+
         res.send(payments);
       } catch (error) {
         console.error("Error fetching payment history:", error);
