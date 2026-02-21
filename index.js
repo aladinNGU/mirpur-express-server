@@ -47,6 +47,7 @@ async function run() {
     const trackingCollection = db.collection("trackings");
     const userCollection = db.collection("users");
     const riderCollection = db.collection("riders");
+    const cashOutCollection = db.collection("cashOutRequests");
 
     // customs middlewares
     const verifyFBToken = async (req, res, next) => {
@@ -68,6 +69,26 @@ async function run() {
       } catch (error) {
         return res.status(403).send({ message: "forbidden access" });
       }
+    };
+
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
+
+    const verifyRider = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      if (!user || user.role !== "rider") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
     };
 
     app.get("/users/search", async (req, res) => {
@@ -99,24 +120,29 @@ async function run() {
       }
     });
 
-    app.patch("/users/make-admin/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
+    app.patch(
+      "/users/make-admin/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
 
-        const result = await userCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              role: "admin",
+          const result = await userCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: {
+                role: "admin",
+              },
             },
-          },
-        );
+          );
 
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Failed to make admin" });
-      }
-    });
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to make admin" });
+        }
+      },
+    );
 
     app.patch("/users/revoke-admin/:id", async (req, res) => {
       try {
@@ -205,6 +231,154 @@ async function run() {
       }
     });
 
+    app.get("/parcels/assignable", async (req, res) => {
+      try {
+        const parcels = await parcelCollection
+          .find({
+            paymentStatus: "paid",
+            deliveryStatus: "not_collected",
+          })
+          .toArray();
+
+        res.send(parcels);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to get parcels" });
+      }
+    });
+
+    // Get all pending deliveries
+    app.get("/riders/parcels", verifyFBToken, verifyRider, async (req, res) => {
+      try {
+        const email = req.query.email;
+        console.log(email);
+
+        if (!email) {
+          return res.status(400).send({
+            success: false,
+            message: "Rider email is required",
+          });
+        }
+
+        const query = {
+          riderEmail: email,
+          deliveryStatus: {
+            $in: ["Rider assigned", "In transit"],
+          },
+        };
+
+        const parcels = await parcelCollection
+          .find(query)
+          .sort({ creationDate: -1 }) // newest first
+          .toArray();
+
+        res.status(200).send({
+          success: true,
+          total: parcels.length,
+          data: parcels,
+        });
+      } catch (error) {
+        console.error("Error fetching rider pending parcels:", error);
+        res.status(500).send({
+          success: false,
+          message: "Internal server error",
+        });
+      }
+    });
+
+    app.get(
+      "/riders/completed-parcels",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const { email } = req.query;
+
+          if (!email) {
+            return res.status(400).send({
+              success: false,
+              message: "Rider email is required",
+            });
+          }
+
+          const query = {
+            riderEmail: email,
+            deliveryStatus: {
+              $in: ["Delivery Completed", "SC Delivered"],
+            },
+          };
+
+          const parcels = await parcelCollection
+            .find(query)
+            .sort({ creationDate: -1 }) // newest first
+            .toArray();
+
+          res.status(200).send({
+            success: true,
+            total: parcels.length,
+            data: parcels,
+          });
+        } catch (error) {
+          console.error("Error fetching completed parcels:", error);
+          res.status(500).send({
+            success: false,
+            message: "Internal server error",
+          });
+        }
+      },
+    );
+
+    // Update delivery status
+    app.patch("/parcels/:id/status", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        const allowedStatuses = ["In transit", "Delivery Completed"];
+
+        if (!allowedStatuses.includes(status)) {
+          return res.status(400).send({
+            success: false,
+            message: "Invalid status update",
+          });
+        }
+
+        const result = await parcelCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { deliveryStatus: status } },
+        );
+
+        res.send({
+          success: true,
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        res.status(500).send({ success: false });
+      }
+    });
+
+    app.patch("/parcels/assign/:id", async (req, res) => {
+      try {
+        const { riderId, riderEmail, riderName } = req.body;
+        const id = req.params.id;
+
+        const result = await parcelCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              riderId,
+              riderEmail,
+              riderName,
+              deliveryStatus: "Rider assigned",
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Assign failed" });
+      }
+    });
+
     app.get("/parcels/:id", async (req, res) => {
       try {
         const id = req.params.id;
@@ -214,6 +388,23 @@ async function run() {
       } catch (error) {
         console.error("Get parcel error:", error);
         res.status(500).send({ message: "Failed to fetch parcel" });
+      }
+    });
+
+    // GET riders by district
+    app.get("/riders", async (req, res) => {
+      try {
+        const { district } = req.query;
+
+        if (!district) {
+          return res.status(400).send({ message: "District is required" });
+        }
+
+        const riders = await riderCollection.find({ district }).toArray();
+
+        res.send(riders);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to get riders" });
       }
     });
 
@@ -243,31 +434,6 @@ async function run() {
         res.status(500).send({ message: "Failed to get pending riders" });
       }
     });
-
-    // app.patch("/riders/:id/approve", async (req, res) => {
-    //   const id = req.params.id;
-
-    //   await riderCollection.updateOne(
-    //     { _id: new ObjectId(id) },
-    //     { $set: { status: "active" } },
-    //   );
-    //   // Update user role for accepting rider
-    //   const { email } = req.body;
-    //   if (status === "active") {
-    //     const userQuery = { email };
-    //     const userUpdateDoc = {
-    //       $set: {
-    //         role: "rider",
-    //       },
-    //     };
-    //     const roleResult = await userCollection.updateOne(
-    //       userQuery,
-    //       userUpdateDoc,
-    //     );
-    //     console.log(roleResult.modifiedCount);
-    //   }
-    //   res.send({ success: true });
-    // });
 
     app.patch("/riders/:id/approve", async (req, res) => {
       try {
@@ -329,7 +495,7 @@ async function run() {
       res.send({ success: true });
     });
 
-    app.get("/riders/active", async (req, res) => {
+    app.get("/riders/active", verifyFBToken, verifyAdmin, async (req, res) => {
       try {
         const search = req.query.search || "";
 
