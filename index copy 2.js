@@ -47,6 +47,7 @@ async function run() {
     const trackingCollection = db.collection("trackings");
     const userCollection = db.collection("users");
     const riderCollection = db.collection("riders");
+    const cashoutCollection = db.collection("cashouts");
 
     // customs middlewares
     const verifyFBToken = async (req, res, next) => {
@@ -332,8 +333,6 @@ async function run() {
         const { id } = req.params;
         const { status } = req.body;
 
-        const updatedDoc = { deliveryStatus: status };
-
         const allowedStatuses = ["In transit", "Delivery Completed"];
 
         if (!allowedStatuses.includes(status)) {
@@ -343,15 +342,9 @@ async function run() {
           });
         }
 
-        if (status === "In transit") {
-          updatedDoc.pickedAt = new Date().toISOString();
-        } else if (status === "Delivery Completed") {
-          updatedDoc.deliveredAt = new Date().toISOString();
-        }
-
         const result = await parcelCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: updatedDoc },
+          { $set: { deliveryStatus: status } },
         );
 
         res.send({
@@ -363,14 +356,14 @@ async function run() {
       }
     });
 
-    app.patch("/parcels/:id/cashout", async (req, res) => {
-      const id = req.params.id;
-      const result = await parcelCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { cashoutStatus: "cashed out", cashedAt: new Date() } },
-      );
-      res.send(result);
-    });
+    // app.patch("/parcels/:id/cashout", async (req, res) => {
+    //   const id = req.params.id;
+    //   const result = await parcelCollection.updateOne(
+    //     { _id: new ObjectId(id) },
+    //     { $set: { cashoutStatus: "cash out", cashedAt: new Date() } },
+    //   );
+    //   res.send(result);
+    // });
 
     app.patch("/parcels/assign/:id", async (req, res) => {
       try {
@@ -422,30 +415,6 @@ async function run() {
       } catch (error) {
         res.status(500).send({ message: "Failed to get riders" });
       }
-    });
-
-    // Tracking APIs
-    app.get("/trackings/:tracking_Id", async (req, res) => {
-      const tracking_Id = req.params.tracking_Id;
-      const updates = await trackingCollection
-        .find({
-          trackingId: tracking_Id,
-        })
-        .sort({ timestamp: 1 })
-        .toArray();
-      res.send(updates);
-    });
-
-    app.post("/trackings", async (req, res) => {
-      const update = req.body;
-      update.timestamp = new Date();
-      if (!update.trackingId || !update.status) {
-        return res
-          .status(400)
-          .send({ message: "trackingId and status are required" });
-      }
-      const result = await trackingCollection.insertOne(update);
-      res.status(201).send(result);
     });
 
     app.post("/riders", async (req, res) => {
@@ -744,6 +713,296 @@ async function run() {
         res.status(500).send({ message: "Failed to delete parcel" });
       }
     });
+
+    ////////////////////////////////////////////////////////////
+
+    // Request cashout
+    app.post(
+      "/riders/cashout",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const { email, amount, riderName } = req.body;
+
+          if (!email || !amount || !riderName) {
+            return res.status(400).send({
+              success: false,
+              message: "Missing required fields",
+            });
+          }
+
+          // Check if rider has any pending cashout requests
+          const pendingCashout = await cashoutCollection.findOne({
+            riderEmail: email,
+            status: "Pending",
+          });
+
+          if (pendingCashout) {
+            return res.status(400).send({
+              success: false,
+              message: "You already have a pending cashout request",
+            });
+          }
+
+          // Calculate total completed deliveries earnings
+          const completedParcels = await parcelCollection
+            .find({
+              riderEmail: email,
+              deliveryStatus: { $in: ["Delivery Completed", "SC Delivered"] },
+            })
+            .toArray();
+
+          // Calculate earnings (reusing your calculation logic)
+          const calculateEarning = (parcel) => {
+            const isSameDistrict =
+              parcel.senderDistrict === parcel.receiverDistrict;
+            const percentage = isSameDistrict ? 0.8 : 0.3;
+            return (parcel.deliveryCharge || 0) * percentage;
+          };
+
+          const totalEarnings = completedParcels.reduce(
+            (sum, parcel) => sum + calculateEarning(parcel),
+            0,
+          );
+
+          // Check if requested amount is valid
+          if (amount > totalEarnings) {
+            return res.status(400).send({
+              success: false,
+              message: `Insufficient balance. Available: ৳${totalEarnings.toFixed(2)}`,
+            });
+          }
+
+          if (amount < 100) {
+            return res.status(400).send({
+              success: false,
+              message: "Minimum cashout amount is ৳100",
+            });
+          }
+
+          // Create cashout request
+          const cashoutRequest = {
+            riderEmail: email,
+            riderName,
+            amount: parseFloat(amount),
+            status: "Pending",
+            requestDate: new Date(),
+            processedDate: null,
+            transactionId: null,
+            notes: "",
+          };
+
+          const result = await cashoutCollection.insertOne(cashoutRequest);
+
+          res.status(201).send({
+            success: true,
+            message: "Cashout request submitted successfully",
+            data: { ...cashoutRequest, _id: result.insertedId },
+          });
+        } catch (error) {
+          console.error("Error processing cashout request:", error);
+          res.status(500).send({
+            success: false,
+            message: "Internal server error",
+          });
+        }
+      },
+    );
+
+    // Get rider's cashout history
+    app.get(
+      "/riders/cashout-history",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const { email } = req.query;
+
+          if (!email) {
+            return res.status(400).send({
+              success: false,
+              message: "Rider email is required",
+            });
+          }
+
+          const cashouts = await cashoutCollection
+            .find({ riderEmail: email })
+            .sort({ requestDate: -1 })
+            .toArray();
+
+          res.status(200).send({
+            success: true,
+            data: cashouts,
+          });
+        } catch (error) {
+          console.error("Error fetching cashout history:", error);
+          res.status(500).send({
+            success: false,
+            message: "Internal server error",
+          });
+        }
+      },
+    );
+
+    // Get rider's current balance
+    app.get("/riders/balance", verifyFBToken, verifyRider, async (req, res) => {
+      try {
+        const { email } = req.query;
+
+        if (!email) {
+          return res.status(400).send({
+            success: false,
+            message: "Rider email is required",
+          });
+        }
+
+        // Get all completed parcels
+        const completedParcels = await parcelCollection
+          .find({
+            riderEmail: email,
+            deliveryStatus: { $in: ["Delivery Completed", "SC Delivered"] },
+          })
+          .toArray();
+
+        // Calculate earnings
+        const calculateEarning = (parcel) => {
+          const isSameDistrict =
+            parcel.senderDistrict === parcel.receiverDistrict;
+          const percentage = isSameDistrict ? 0.8 : 0.3;
+          return (parcel.deliveryCharge || 0) * percentage;
+        };
+
+        const totalEarnings = completedParcels.reduce(
+          (sum, parcel) => sum + calculateEarning(parcel),
+          0,
+        );
+
+        // Get total cashouted amount
+        const cashoutedAmount = await cashoutCollection
+          .aggregate([
+            {
+              $match: {
+                riderEmail: email,
+                status: { $in: ["Completed", "Pending"] },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: "$amount" },
+              },
+            },
+          ])
+          .toArray();
+
+        const totalCashouted = cashoutedAmount[0]?.total || 0;
+
+        // Current balance = total earnings - total cashouted
+        const currentBalance = totalEarnings - totalCashouted;
+
+        // Check pending cashout
+        const pendingCashout = await cashoutCollection.findOne({
+          riderEmail: email,
+          status: "Pending",
+        });
+
+        res.status(200).send({
+          success: true,
+          data: {
+            totalEarnings,
+            totalCashouted,
+            currentBalance,
+            hasPendingCashout: !!pendingCashout,
+            pendingCashoutAmount: pendingCashout?.amount || 0,
+          },
+        });
+      } catch (error) {
+        console.error("Error fetching rider balance:", error);
+        res.status(500).send({
+          success: false,
+          message: "Internal server error",
+        });
+      }
+    });
+
+    // Admin: Get all cashout requests
+    app.get(
+      "/admin/cashout-requests",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { status } = req.query;
+          const query = status ? { status } : {};
+
+          const cashouts = await cashoutCollection
+            .find(query)
+            .sort({ requestDate: -1 })
+            .toArray();
+
+          res.status(200).send({
+            success: true,
+            data: cashouts,
+          });
+        } catch (error) {
+          console.error("Error fetching cashout requests:", error);
+          res.status(500).send({
+            success: false,
+            message: "Internal server error",
+          });
+        }
+      },
+    );
+
+    // Admin: Process cashout request
+    app.patch(
+      "/admin/cashout/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const { status, transactionId, notes } = req.body;
+
+          if (!["Completed", "Rejected"].includes(status)) {
+            return res.status(400).send({
+              success: false,
+              message: "Invalid status",
+            });
+          }
+
+          const updateData = {
+            status,
+            processedDate: new Date(),
+            notes: notes || "",
+          };
+
+          if (status === "Completed" && transactionId) {
+            updateData.transactionId = transactionId;
+          }
+
+          const result = await cashoutCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updateData },
+          );
+
+          res.status(200).send({
+            success: true,
+            message: `Cashout request ${status.toLowerCase()}`,
+            modifiedCount: result.modifiedCount,
+          });
+        } catch (error) {
+          console.error("Error processing cashout request:", error);
+          res.status(500).send({
+            success: false,
+            message: "Internal server error",
+          });
+        }
+      },
+    );
+
+    ////////////////////////////////////////////////////////
 
     app.post("/create-payment-intent", async (req, res) => {
       try {
