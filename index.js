@@ -448,6 +448,17 @@ async function run() {
       res.status(201).send(result);
     });
 
+    app.get("/trackings/:trackingId", async (req, res) => {
+      const { trackingId } = req.params;
+
+      const result = await trackingCollection
+        .find({ trackingId })
+        .sort({ timestamp: -1 })
+        .toArray();
+
+      res.send(result);
+    });
+
     app.post("/riders", async (req, res) => {
       const email = req.query.email;
 
